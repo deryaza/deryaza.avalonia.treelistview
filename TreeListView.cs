@@ -42,6 +42,7 @@ public class TreeListView : Grid
     public static readonly StyledProperty<bool> ShowRowDetailsProperty = AvaloniaProperty.Register<TreeListView, bool>(nameof(ShowRowDetails));
     public static readonly StyledProperty<IEnumerable?> ItemsSourceProperty = AvaloniaProperty.Register<TreeListView, IEnumerable?>(nameof(ItemsSource));
     public static readonly StyledProperty<string?> ChildrenPropertyNameProperty = AvaloniaProperty.Register<TreeListView, string?>(nameof(ChildrenPropertyName));
+    public static readonly StyledProperty<IDataTemplate?> RowDetailsTemplateProperty = AvaloniaProperty.Register<TreeListView, IDataTemplate?>(nameof(RowDetailsTemplate));
 
     public string? ChildrenPropertyName { get => GetValue(ChildrenPropertyNameProperty); set => SetValue(ChildrenPropertyNameProperty, value); }
 
@@ -52,6 +53,13 @@ public class TreeListView : Grid
     public object? SelectedItemEx { get => GetValue(SelectedItemExProperty); set => SetValue(SelectedItemExProperty, value); }
 
     public GridView? View { get => GetValue(ViewProperty); set => SetValue(ViewProperty, value); }
+
+    [InheritDataTypeFromItems(nameof(ItemsSource))]
+    public IDataTemplate? RowDetailsTemplate
+    {
+        get => GetValue(RowDetailsTemplateProperty);
+        set => SetValue(RowDetailsTemplateProperty, value);
+    }
 
     protected override void OnPropertyChanged(AvaloniaPropertyChangedEventArgs change)
     {
@@ -68,6 +76,13 @@ public class TreeListView : Grid
         else if (change.Property == ChildrenPropertyNameProperty)
         {
             UpdateSubPath(change.GetNewValue<string>());
+        }
+        else if (change.Property == RowDetailsTemplateProperty || change.Property == ShowRowDetailsProperty)
+        {
+            foreach (TreeListViewItem tlv in _rows.Children.Cast<TreeListViewItem>())
+            {
+                tlv.UpdateRowDetails();
+            }
         }
     }
 
@@ -168,7 +183,19 @@ public class TreeListView : Grid
     {
         if (isSelected)
         {
-            foreach (TreeListViewItem tlv in _rows.Children.Cast<TreeListViewItem>())
+            IEnumerable<TreeListViewItem> Flatten(IEnumerable<TreeListViewItem> e)
+            {
+                foreach (var i in e)
+                {
+                    yield return i;
+                    foreach (var subrow in Flatten(i.SubRows))
+                    {
+                        yield return subrow;
+                    }
+                }
+            }
+
+            foreach (TreeListViewItem tlv in Flatten(_rows.Children.Cast<TreeListViewItem>()))
             {
                 tlv.IsSelected = treeListViewRow == tlv;
             }
@@ -324,6 +351,8 @@ public class TreeListView : Grid
     {
         public static readonly StyledProperty<IBrush?> BackgroundProperty = AvaloniaProperty.Register<Row, IBrush?>(nameof(Background));
 
+        private double? beforeDetailsRowHeight;
+
         /// <summary>
         /// Gets or sets a brush with which to paint the background.
         /// </summary>
@@ -409,37 +438,91 @@ public class TreeListView : Grid
                 context.FillRectangle(background, new(renderSize));
             }
 
-            context.FillRectangle(Brushes.Transparent, new(renderSize));
             context.FillRectangle(Brushes.Black, new(0, renderSize.Height, renderSize.Width, 1));
+
+            if (beforeDetailsRowHeight is double rh)
+            {
+                context.FillRectangle(Brushes.Black, new(0, rh, renderSize.Width, 1));
+            }
         }
 
         protected override Size MeasureOverride(Size availableSize)
         {
             var constrainedSize = availableSize.WithWidth(double.PositiveInfinity);
             var desiredSize = new Size();
+            RowDetailsPresenter? details = null;
+
             foreach (var child in Children)
             {
                 child.Measure(constrainedSize);
                 var childSize = child.DesiredSize;
-                desiredSize = new(desiredSize.Width + childSize.Width, Math.Max(desiredSize.Height, childSize.Height));
+
+                if (child is RowDetailsPresenter rd)
+                {
+                    details = rd;
+                    continue;
+                }
+
+                desiredSize = new(
+                    desiredSize.Width + childSize.Width,
+                    Math.Max(desiredSize.Height, childSize.Height));
             }
+
+            if (details is { IsVisible: true })
+            {
+                // Measure details with the row width so it can stretch.
+                details.Measure(availableSize.WithWidth(desiredSize.Width));
+                var detSize = details.DesiredSize;
+                desiredSize = desiredSize.WithHeight(desiredSize.Height + detSize.Height);
+            }
+
             return desiredSize;
         }
 
         protected override Size ArrangeOverride(Size finalSize)
         {
             double prevChild = 0;
-            double height = finalSize.Height;
+            double rowHeight = 0;
+            RowDetailsPresenter? details = null;
 
             foreach (var child in Children)
             {
-                height = Math.Max(height, child.DesiredSize.Height);
-                child.Arrange(new Rect(prevChild, 0, child.DesiredSize.Width, height));
-                prevChild += child.DesiredSize.Width;
+                if (child is RowDetailsPresenter rd)
+                {
+                    details = rd;
+                    continue;
+                }
+
+                rowHeight = Math.Max(rowHeight, child.DesiredSize.Height);
+            }
+
+            foreach (var child in Children)
+            {
+                if (child is RowDetailsPresenter) continue;
+
+                var width = child.DesiredSize.Width;
+                child.Arrange(new Rect(prevChild, 0, width, rowHeight));
+                prevChild += width;
+            }
+
+            if (details is { IsVisible: true })
+            {
+                var rowWidth = Math.Max(prevChild, finalSize.Width);
+                var detailsHeight = details.DesiredSize.Height;
+                beforeDetailsRowHeight = rowHeight;
+                details.Arrange(new Rect(0, rowHeight, rowWidth, detailsHeight));
+            }
+            else
+            {
+                beforeDetailsRowHeight = null;
             }
 
             return finalSize;
         }
+    }
+
+    public class RowDetailsPresenter : ContentControl
+    {
     }
 
     public abstract class Cell : ContentControl
@@ -478,7 +561,7 @@ public class TreeListView : Grid
                 size = size.WithWidth(ChildColumnWidth);
             }
 
-            foreach (var c in parent._rows.Children.Cast<Row>().SelectMany(x => x.Children).Cast<Cell>()) c.InvalidateMeasure();
+            foreach (var c in parent._rows.Children.Cast<Row>().SelectMany(x => x.Children).OfType<Cell>()) c.InvalidateMeasure();
 
             return size;
         }
@@ -729,6 +812,8 @@ public class TreeListViewItem : TreeListView.Row
         Parent = parent;
     }
 
+    private TreeListView.RowDetailsPresenter? _rowDetailsPresenter;
+
     public int Level { get; }
     public TreeListView Parent { get; }
 
@@ -752,6 +837,7 @@ public class TreeListViewItem : TreeListView.Row
             }
 
             UpdateSubPath(_childPropertyName, change.NewValue);
+            UpdateRowDetails();
         }
         else if (change.Property == IsExpandedProperty)
         {
@@ -773,6 +859,7 @@ public class TreeListViewItem : TreeListView.Row
         else if (change.Property == IsSelectedProperty)
         {
             Parent.OnRowIsSelectedChanged(this, IsSelected);
+            UpdateRowDetails();
         }
 
         if (change.Property == IsPointerOverProperty || change.Property == IsSelectedProperty)
@@ -916,6 +1003,7 @@ public class TreeListViewItem : TreeListView.Row
 
         _currentColumns = columns;
         Children.Clear();
+        _rowDetailsPresenter = null;
 
         for (int i = 0; i < columns.Count; i++)
         {
@@ -931,6 +1019,49 @@ public class TreeListViewItem : TreeListView.Row
 
             Children.Add(cell);
         }
+
+        UpdateRowDetails();
+    }
+
+    internal void UpdateRowDetails()
+    {
+        var template = Parent.RowDetailsTemplate;
+
+        if (!Parent.ShowRowDetails || template == null || !IsSelected)
+        {
+            if (_rowDetailsPresenter != null)
+            {
+                Children.Remove(_rowDetailsPresenter);
+                _rowDetailsPresenter = null;
+            }
+
+            return;
+        }
+
+        var content = template.Build(DataContext);
+        if (content == null)
+        {
+            if (_rowDetailsPresenter != null)
+            {
+                Children.Remove(_rowDetailsPresenter);
+                _rowDetailsPresenter = null;
+            }
+
+            return;
+        }
+
+        if (_rowDetailsPresenter == null)
+        {
+            _rowDetailsPresenter = new TreeListView.RowDetailsPresenter
+            {
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                Margin = new Thickness(5 + Level * 15, 2, 0, 2)
+            };
+
+            Children.Add(_rowDetailsPresenter);
+        }
+
+        _rowDetailsPresenter.Content = content;
     }
 }
 
