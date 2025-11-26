@@ -18,6 +18,7 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Collections.Specialized;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Linq;
 using System.Reactive.Linq;
 using Avalonia;
@@ -117,6 +118,11 @@ public class TreeListView : Grid
         {
             case NotifyCollectionChangedAction.Reset:
                 {
+                    foreach (TreeListViewItem row in _rows.Children.Cast<TreeListViewItem>())
+                    {
+                        row.IsExpanded = false;
+                    }
+
                     _rows.Children.Clear();
                     break;
                 }
@@ -129,7 +135,7 @@ public class TreeListView : Grid
 
                     foreach (object item in e.NewItems)
                     {
-                        var row = new TreeListViewRow(0)
+                        var row = new TreeListViewItem(0, this)
                         {
                             DataContext = item,
                         };
@@ -147,277 +153,69 @@ public class TreeListView : Grid
                         return;
                     }
 
+                    for (int count = 0; count < e.OldItems.Count; count++)
+                    {
+                        ((TreeListViewItem)_rows.Children[count + e.OldStartingIndex]).IsExpanded = false;
+                    }
+
                     _rows.Children.RemoveRange(e.OldStartingIndex, e.OldItems.Count);
                     break;
                 }
         }
     }
 
-    class TreeListViewRootRow : Row
+    internal void OnRowIsSelectedChanged(TreeListViewItem treeListViewRow, bool isSelected)
     {
-        public static StyledProperty<bool> IsSelectedProperty = AvaloniaProperty.Register<TreeListViewRow, bool>(nameof(IsSelected), defaultBindingMode: Avalonia.Data.BindingMode.TwoWay);
-        public bool IsSelected
-
+        if (isSelected)
         {
-            get => GetValue(IsSelectedProperty);
-            set => SetValue(IsSelectedProperty, value);
-        }
-
-        protected override void OnPointerReleased(PointerReleasedEventArgs e)
-        {
-            base.OnPointerReleased(e);
-
-            IsSelected = true;
-        }
-
-        protected override void OnPropertyChanged(AvaloniaPropertyChangedEventArgs change)
-        {
-            base.OnPropertyChanged(change);
-            if (change.Property == IsPointerOverProperty || change.Property == IsSelectedProperty)
+            foreach (TreeListViewItem tlv in _rows.Children.Cast<TreeListViewItem>())
             {
-                UpdateBackground();
-            }
-        }
-
-        private void UpdateBackground()
-        {
-            IBrush? brush;
-            if (IsPointerOver || IsSelected)
-            {
-                brush = this.TryFindResource("TreeListViewSelectedBrush", ActualThemeVariant, out var obj)
-                        ? obj as IBrush
-                        : this.TryFindResource("SystemControlHighlightListAccentLowBrush", ActualThemeVariant, out obj)
-                            ? obj as IBrush
-                            : Brushes.Gray;
-            }
-            else
-            {
-                brush = null;
+                tlv.IsSelected = treeListViewRow == tlv;
             }
 
-            SetValue(BackgroundProperty, brush, BindingPriority.Style);
+            SelectedItemEx = treeListViewRow.DataContext;
+        }
+        else if (treeListViewRow.DataContext == SelectedItemEx)
+        {
+            SelectedItemEx = null;
         }
     }
 
-    class TreeListViewRow : StackPanel
+    internal void OnSubRowsRemoved(TreeListViewItem parent, int from, int count, bool overrideExpanded = false)
     {
-        public static StyledProperty<bool> IsExpandedProperty = AvaloniaProperty.Register<TreeListViewRow, bool>(nameof(IsExpanded), defaultBindingMode: Avalonia.Data.BindingMode.TwoWay);
+        if (!overrideExpanded && !parent.IsExpanded)
+        {
+            return;
+        }
+
+        var idx = _rows.Children.IndexOf(parent);
+        Debug.Assert(idx >= 0);
+        _rows.Children.RemoveRange(idx + from + 1, count);
+    }
+
+    internal void OnSubRowsInserted(TreeListViewItem parent, int index, IEnumerable<TreeListViewItem> row)
+    {
+        if (!parent.IsExpanded)
+        {
+            return;
+        }
+
+        var idx = _rows.Children.IndexOf(parent);
+        Debug.Assert(idx >= 0);
+        _rows.Children.InsertRange(idx + index + 1, row);
+    }
+
+
+    public class TreeListViewCell(HeaderCell headerColumn, int level) : Cell
+    {
+        public static readonly StyledProperty<bool> IsExpandedProperty = AvaloniaProperty.Register<TreeListViewCell, bool>(nameof(IsExpanded), defaultBindingMode: BindingMode.TwoWay);
         public bool IsExpanded
         {
             get => GetValue(IsExpandedProperty);
             set => SetValue(IsExpandedProperty, value);
         }
 
-        public static StyledProperty<bool> IsSelectedProperty = AvaloniaProperty.Register<TreeListViewRow, bool>(nameof(IsSelected), defaultBindingMode: Avalonia.Data.BindingMode.TwoWay);
-        public bool IsSelected
-
-        {
-            get => GetValue(IsSelectedProperty);
-            set => SetValue(IsSelectedProperty, value);
-        }
-
-        public static StyledProperty<bool> HasChildrenProperty = AvaloniaProperty.Register<TreeListViewRow, bool>(nameof(HasChildren), defaultBindingMode: Avalonia.Data.BindingMode.TwoWay);
-        public bool HasChildren
-        {
-            get => GetValue(HasChildrenProperty);
-            set => SetValue(HasChildrenProperty, value);
-        }
-
-        private IList<Control>? _currentColumns;
-
-        string? _childPropertyName;
-
-        readonly StackPanel _subRows;
-        readonly TreeListViewRootRow _rootRow;
-
-        public TreeListViewRow(int level)
-        {
-            Children.Add(_rootRow = new());
-            Children.Add(_subRows = new());
-            _subRows.IsVisible = false;
-
-            _rootRow[!TreeListViewRootRow.IsSelectedProperty] = this[!!IsSelectedProperty];
-
-            Level = level;
-        }
-
-        public int Level { get; }
-
-        protected override void OnPropertyChanged(AvaloniaPropertyChangedEventArgs change)
-        {
-            base.OnPropertyChanged(change);
-
-            if (change.Property == ParentProperty && change.NewValue == null)
-            {
-                _rootRow.Children.Clear();
-                _subRows.Children.Clear();
-            }
-            else if (change.Property == DataContextProperty)
-            {
-                UpdateSubPath(_childPropertyName, change.NewValue);
-            }
-            else if (change.Property == IsExpandedProperty)
-            {
-                var isExpanded = change.GetNewValue<bool>();
-                if (isExpanded)
-                {
-                    _subRows.IsVisible = true;
-                }
-                else
-                {
-                    _subRows.IsVisible = false;
-                    foreach (TreeListViewRow r in _subRows.Children.Cast<TreeListViewRow>()) r.IsExpanded = false;
-                }
-            }
-            else if (change.Property == IsSelectedProperty)
-            {
-                this.FindAncestorOfType<TreeListView>().OnRowIsSelectedChanged(this, IsSelected);
-            }
-        }
-
-        internal void UpdateSubPath(string? name, object? dataContext)
-        {
-            _childPropertyName = name;
-
-            _subRows.Children.Clear();
-
-            if (name == null || dataContext == null)
-            {
-                return;
-            }
-
-            if (dataContext is INotifyPropertyChanged npc)
-            {
-                npc.PropertyChanged -= ItemPropertyChanged;
-                npc.PropertyChanged += ItemPropertyChanged;
-            }
-
-            ItemPropertyChanged(dataContext, new PropertyChangedEventArgs(name));
-        }
-
-        object? _currentCollection;
-
-        private void ItemPropertyChanged(object? sender, PropertyChangedEventArgs e)
-        {
-            if (sender == null || _childPropertyName == null) return;
-            var prop = sender.GetType().GetProperty(_childPropertyName);
-            if (prop == null) return;
-
-            var newCollection = prop.GetValue(sender);
-
-            if (_currentCollection is INotifyCollectionChanged currentNotify)
-            {
-                currentNotify.CollectionChanged -= ItemCollectionChanged;
-            }
-
-            ItemCollectionChanged(null, new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Reset));
-
-            _currentCollection = newCollection;
-            if (newCollection is not IList initialItems)
-            {
-                return;
-            }
-
-            if (initialItems is INotifyCollectionChanged newNotify)
-            {
-                newNotify.CollectionChanged += ItemCollectionChanged;
-            }
-
-            ItemCollectionChanged(initialItems, new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Add, initialItems));
-        }
-
-        private void ItemCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
-        {
-            switch (e.Action)
-            {
-                case NotifyCollectionChangedAction.Reset:
-                    {
-                        _subRows.Children.Clear();
-                        break;
-                    }
-                case NotifyCollectionChangedAction.Add:
-                    {
-                        if (e.NewItems == null)
-                        {
-                            break;
-                        }
-
-                        foreach (object item in e.NewItems)
-                        {
-                            var row = new TreeListViewRow(Level + 1)
-                            {
-                                DataContext = item,
-                            };
-
-                            if (_currentColumns != null) row.UpdateGridView(_currentColumns);
-                            row.UpdateSubPath(_childPropertyName, item);
-                            _subRows.Children.Add(row);
-                        }
-
-                        break;
-                    }
-                case NotifyCollectionChangedAction.Remove:
-                    {
-                        if (e.OldItems == null)
-                        {
-                            break;
-                        }
-
-                        _subRows.Children.RemoveRange(e.OldStartingIndex, e.OldItems.Count);
-                        break;
-                    }
-            }
-
-            HasChildren = _subRows.Children.Count > 0;
-        }
-
-        internal void UpdateGridView(IList<Control> columns)
-        {
-            if (_currentColumns == columns)
-            {
-                return;
-            }
-
-            _currentColumns = columns;
-            _rootRow.Children.Clear();
-
-            for (int i = 0; i < columns.Count; i++)
-            {
-                HeaderCell headerCell = (HeaderCell)columns[i];
-                GridViewColumn col = headerCell.Column;
-                var cell = new TreeListViewCell(headerCell, Level)
-                {
-                    Content = col?.CellTemplate?.Build(DataContext),
-                    [!TreeListViewCell.IsExpandedProperty] = this[!!IsExpandedProperty],
-                    [!TreeListViewCell.IsExpandableProperty] = this[!HasChildrenProperty],
-                };
-                cell.SetIndex(i);
-
-                _rootRow.Children.Add(cell);
-            }
-
-            foreach (TreeListViewRow r in _subRows.Children.Cast<TreeListViewRow>()) r.UpdateGridView(columns);
-        }
-
-        internal void Swap(int oldIndex, int newIndex)
-        {
-            _rootRow.Swap(oldIndex, newIndex);
-            foreach (TreeListViewRow r in _subRows.Children.Cast<TreeListViewRow>()) r.Swap(oldIndex, newIndex);
-        }
-
-        internal IEnumerable<TreeListViewRow> EnumerateChildren() => _subRows.Children.Cast<TreeListViewRow>();
-    }
-
-    class TreeListViewCell(HeaderCell headerColumn, int level) : Cell
-    {
-        public static StyledProperty<bool> IsExpandedProperty = AvaloniaProperty.Register<TreeListViewCell, bool>(nameof(IsExpanded), defaultBindingMode: BindingMode.TwoWay);
-        public bool IsExpanded
-        {
-            get => GetValue(IsExpandedProperty);
-            set => SetValue(IsExpandedProperty, value);
-        }
-
-        public static StyledProperty<bool> IsExpandableProperty = AvaloniaProperty.Register<TreeListViewRow, bool>(nameof(IsExpandable));
+        public static readonly StyledProperty<bool> IsExpandableProperty = AvaloniaProperty.Register<TreeListViewItem, bool>(nameof(IsExpandable));
         public bool IsExpandable
         {
             get => GetValue(IsExpandableProperty);
@@ -493,18 +291,7 @@ public class TreeListView : Grid
         protected override void OnPropertyChanged(AvaloniaPropertyChangedEventArgs change)
         {
             base.OnPropertyChanged(change);
-            if (change.Property == ParentProperty)
-            {
-                if (change.NewValue == null)
-                {
-                    headerColumn.Cells.Remove(this);
-                }
-                else
-                {
-                    headerColumn.Cells.Add(this);
-                }
-            }
-            else if (change.Property == IsExpandedProperty && _isFirst && IsExpandable)
+            if (change.Property == IsExpandedProperty && _isFirst && IsExpandable)
             {
                 _path.Data = change.GetNewValue<bool>() ? OpenGeometry : ClosedGeometry;
             }
@@ -533,10 +320,9 @@ public class TreeListView : Grid
 
     }
 
-    class Row : Control
+    public class Row : Control
     {
-        public static readonly StyledProperty<IBrush?> BackgroundProperty =
-                        AvaloniaProperty.Register<Border, IBrush?>(nameof(Background));
+        public static readonly StyledProperty<IBrush?> BackgroundProperty = AvaloniaProperty.Register<Row, IBrush?>(nameof(Background));
 
         /// <summary>
         /// Gets or sets a brush with which to paint the background.
@@ -620,7 +406,7 @@ public class TreeListView : Grid
             var background = Background;
             if (background != null)
             {
-                context.FillRectangle(background, bounds);
+                context.FillRectangle(background, new(renderSize));
             }
 
             context.FillRectangle(Brushes.Transparent, new(renderSize));
@@ -656,7 +442,7 @@ public class TreeListView : Grid
         }
     }
 
-    abstract class Cell : ContentControl
+    public abstract class Cell : ContentControl
     {
         public virtual void SetIndex(int i) { }
         public sealed override void Render(DrawingContext context)
@@ -667,7 +453,7 @@ public class TreeListView : Grid
         }
     }
 
-    class HeaderCell(GridViewColumn column) : Cell
+    public class HeaderCell(TreeListView parent, GridViewColumn column) : Cell
     {
         private double childColumnWidth;
 
@@ -681,8 +467,6 @@ public class TreeListView : Grid
             }
         }
 
-        internal readonly List<TreeListViewCell> Cells = [];
-
         public GridViewColumn Column { get; } = column;
 
         protected override Size MeasureCore(Size availableSize)
@@ -694,7 +478,7 @@ public class TreeListView : Grid
                 size = size.WithWidth(ChildColumnWidth);
             }
 
-            foreach (var c in Cells) c.InvalidateMeasure();
+            foreach (var c in parent._rows.Children.Cast<Row>().SelectMany(x => x.Children).Cast<Cell>()) c.InvalidateMeasure();
 
             return size;
         }
@@ -708,7 +492,7 @@ public class TreeListView : Grid
         {
             GridViewColumn col = cols.Columns[i];
             _header.Children.Add(
-                    new HeaderCell(col)
+                    new HeaderCell(this, col)
                     {
                         MinWidth = 25,
                         [!HeaderCell.ContentProperty] = col[!GridViewColumn.HeaderProperty],
@@ -716,42 +500,14 @@ public class TreeListView : Grid
                     });
         }
 
-        foreach (TreeListViewRow tlv in _rows.Children.Cast<TreeListViewRow>()) tlv.UpdateGridView(_header.Children);
+        foreach (TreeListViewItem tlv in _rows.Children.Cast<TreeListViewItem>()) tlv.UpdateGridView(_header.Children);
 
         InvalidateMeasure();
     }
 
     private void UpdateSubPath(string childrenPropName)
     {
-        foreach (TreeListViewRow tlv in _rows.Children.Cast<TreeListViewRow>()) tlv.UpdateSubPath(childrenPropName, tlv.DataContext);
-    }
-
-    private IEnumerable<TreeListViewRow> EnumerateFlatten(IEnumerable<TreeListViewRow> rows)
-    {
-        foreach (var r in rows)
-        {
-            yield return r;
-            foreach (var cr in EnumerateFlatten(r.EnumerateChildren()))
-            {
-                yield return cr;
-            }
-        }
-    }
-    private void OnRowIsSelectedChanged(TreeListViewRow treeListViewRow, bool isSelected)
-    {
-        if (isSelected)
-        {
-            foreach (TreeListViewRow tlv in EnumerateFlatten(_rows.Children.Cast<TreeListViewRow>()))
-            {
-                tlv.IsSelected = treeListViewRow == tlv;
-            }
-
-            SelectedItemEx = treeListViewRow.DataContext;
-        }
-        else if (treeListViewRow.DataContext == SelectedItemEx)
-        {
-            SelectedItemEx = null;
-        }
+        foreach (TreeListViewItem tlv in _rows.Children.Cast<TreeListViewItem>()) tlv.UpdateSubPath(childrenPropName, tlv.DataContext);
     }
 
     #region Columns resize and reorder
@@ -930,12 +686,252 @@ public class TreeListView : Grid
         int oldIndex = _header.Children.IndexOf(dragCell);
         int newIndex = _header.Children.IndexOf(cell);
         _header.Swap(oldIndex, newIndex);
-        foreach (TreeListViewRow row in _rows.Children.Cast<TreeListViewRow>())
+        foreach (TreeListViewItem row in _rows.Children.Cast<TreeListViewItem>())
         {
             row.Swap(oldIndex, newIndex);
         }
     }
+
     #endregion
+}
+
+public class TreeListViewItem : TreeListView.Row
+{
+    public static readonly StyledProperty<bool> IsExpandedProperty = AvaloniaProperty.Register<TreeListViewItem, bool>(nameof(IsExpanded), defaultBindingMode: Avalonia.Data.BindingMode.TwoWay);
+    public bool IsExpanded
+    {
+        get => GetValue(IsExpandedProperty);
+        set => SetValue(IsExpandedProperty, value);
+    }
+
+    public static readonly StyledProperty<bool> IsSelectedProperty = AvaloniaProperty.Register<TreeListViewItem, bool>(nameof(IsSelected), defaultBindingMode: Avalonia.Data.BindingMode.TwoWay);
+    public bool IsSelected
+
+    {
+        get => GetValue(IsSelectedProperty);
+        set => SetValue(IsSelectedProperty, value);
+    }
+
+    public static readonly StyledProperty<bool> HasChildrenProperty = AvaloniaProperty.Register<TreeListViewItem, bool>(nameof(HasChildren), defaultBindingMode: Avalonia.Data.BindingMode.TwoWay);
+    public bool HasChildren
+    {
+        get => GetValue(HasChildrenProperty);
+        set => SetValue(HasChildrenProperty, value);
+    }
+
+    private IList<Control>? _currentColumns;
+
+    string? _childPropertyName;
+
+    public TreeListViewItem(int level, TreeListView parent)
+    {
+        Level = level;
+        Parent = parent;
+    }
+
+    public int Level { get; }
+    public TreeListView Parent { get; }
+
+    protected override void OnPropertyChanged(AvaloniaPropertyChangedEventArgs change)
+    {
+        base.OnPropertyChanged(change);
+
+        if (change.Property == ParentProperty && change.NewValue == null)
+        {
+            foreach (var subrow in SubRows)
+            {
+                subrow.IsExpanded = false;
+            }
+            IsExpanded = false;
+        }
+        else if (change.Property == DataContextProperty)
+        {
+            if (change.OldValue is INotifyPropertyChanged npp)
+            {
+                npp.PropertyChanged -= ItemPropertyChanged;
+            }
+
+            UpdateSubPath(_childPropertyName, change.NewValue);
+        }
+        else if (change.Property == IsExpandedProperty)
+        {
+            var isExpanded = change.GetNewValue<bool>();
+            if (isExpanded)
+            {
+                Parent.OnSubRowsInserted(this, 0, SubRows);
+            }
+            else
+            {
+                foreach (var subrow in SubRows)
+                {
+                    subrow.IsExpanded = false;
+                }
+
+                Parent.OnSubRowsRemoved(this, 0, SubRows.Count, true);
+            }
+        }
+        else if (change.Property == IsSelectedProperty)
+        {
+            Parent.OnRowIsSelectedChanged(this, IsSelected);
+        }
+
+        if (change.Property == IsPointerOverProperty || change.Property == IsSelectedProperty)
+        {
+            UpdateBackground(change.GetNewValue<bool>());
+        }
+    }
+
+    protected override void OnPointerReleased(PointerReleasedEventArgs e)
+    {
+        base.OnPointerReleased(e);
+        IsSelected = true;
+    }
+
+    private void UpdateBackground(bool isPointerOver)
+    {
+        IBrush? brush;
+        if (isPointerOver || IsSelected)
+        {
+            brush = this.TryFindResource("TreeListViewSelectedBrush", ActualThemeVariant, out var obj)
+                    ? obj as IBrush
+                    : this.TryFindResource("SystemControlHighlightListAccentLowBrush", ActualThemeVariant, out obj)
+                        ? obj as IBrush
+                        : Brushes.Gray;
+        }
+        else
+        {
+            brush = null;
+        }
+
+        SetValue(BackgroundProperty, brush, BindingPriority.Style);
+    }
+
+    internal void UpdateSubPath(string? name, object? dataContext)
+    {
+        _childPropertyName = name;
+
+        if (name == null || dataContext == null)
+        {
+            return;
+        }
+
+        if (dataContext is INotifyPropertyChanged npc)
+        {
+            npc.PropertyChanged -= ItemPropertyChanged;
+            npc.PropertyChanged += ItemPropertyChanged;
+        }
+
+        ItemPropertyChanged(dataContext, new PropertyChangedEventArgs(name));
+    }
+
+    object? _currentCollection;
+
+    private void ItemPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (sender == null || _childPropertyName == null) return;
+        var prop = sender.GetType().GetProperty(_childPropertyName);
+        if (prop == null) return;
+
+        var newCollection = prop.GetValue(sender);
+
+        if (_currentCollection is INotifyCollectionChanged currentNotify)
+        {
+            currentNotify.CollectionChanged -= ItemCollectionChanged;
+        }
+
+        ItemCollectionChanged(null, new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Reset));
+
+        _currentCollection = newCollection;
+        if (newCollection is not IList initialItems)
+        {
+            return;
+        }
+
+        if (initialItems is INotifyCollectionChanged newNotify)
+        {
+            newNotify.CollectionChanged += ItemCollectionChanged;
+        }
+
+        ItemCollectionChanged(initialItems, new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Add, initialItems));
+    }
+
+    internal readonly List<TreeListViewItem> SubRows = new();
+    private void ItemCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        switch (e.Action)
+        {
+            case NotifyCollectionChangedAction.Reset:
+                {
+                    int count = SubRows.Count;
+                    SubRows.Clear();
+                    Parent.OnSubRowsRemoved(this, 0, count);
+                    break;
+                }
+            case NotifyCollectionChangedAction.Add:
+                {
+                    if (e.NewItems == null)
+                    {
+                        break;
+                    }
+
+                    int index = e.NewStartingIndex == -1 ? SubRows.Count : e.NewStartingIndex;
+                    foreach (object item in e.NewItems)
+                    {
+                        var childRow = new TreeListViewItem(Level + 1, Parent)
+                        {
+                            DataContext = item,
+                        };
+
+                        if (_currentColumns != null) childRow.UpdateGridView(_currentColumns);
+                        childRow.UpdateSubPath(_childPropertyName, item);
+
+                        SubRows.Insert(index, childRow);
+                        Parent.OnSubRowsInserted(this, index, [childRow]);
+                    }
+
+                    break;
+                }
+            case NotifyCollectionChangedAction.Remove:
+                {
+                    if (e.OldItems == null)
+                    {
+                        break;
+                    }
+
+                    SubRows.RemoveRange(e.OldStartingIndex, e.OldItems.Count);
+                    Parent.OnSubRowsRemoved(this, e.OldStartingIndex, e.OldItems.Count);
+                    break;
+                }
+        }
+
+        HasChildren = SubRows.Count > 0;
+    }
+
+    internal void UpdateGridView(IList<Control> columns)
+    {
+        if (_currentColumns == columns)
+        {
+            return;
+        }
+
+        _currentColumns = columns;
+        Children.Clear();
+
+        for (int i = 0; i < columns.Count; i++)
+        {
+            TreeListView.HeaderCell headerCell = (TreeListView.HeaderCell)columns[i];
+            GridViewColumn col = headerCell.Column;
+            var cell = new TreeListView.TreeListViewCell(headerCell, Level)
+            {
+                Content = col?.CellTemplate?.Build(DataContext),
+                [!TreeListView.TreeListViewCell.IsExpandedProperty] = this[!!IsExpandedProperty],
+                [!TreeListView.TreeListViewCell.IsExpandableProperty] = this[!HasChildrenProperty],
+            };
+            cell.SetIndex(i);
+
+            Children.Add(cell);
+        }
+    }
 }
 
 public class GridView : AvaloniaObject
